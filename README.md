@@ -80,8 +80,6 @@ swapping the bridged script requires no changes to SessionBridge.exe at all.
 
 - Visual Studio 2022, .NET Framework 4.8, Console App template.
 - Recommended: Release config, `x64` platform target.
-- See [project-properties.md](project-properties.md) for the full rundown of
-  which project settings matter here and why.
 
 ## Usage
 
