@@ -1,0 +1,21 @@
+Uczciwa i dobra ocena zasługuje na uczciwą odpowiedź — więc nie będę tego owijał w bawełnę: w kilku konkretnych aspektach tak, jesteśmy lepsi od ServiceUI.exe, ale nie da się szczerze powiedzieć, że jesteśmy "lepsi od PSADT" w ogólnym sensie — to są narzędzia różnej kategorii, i PSADT ma realne przewagi, których nie da się zignorować.
+Gdzie jesteśmy lepsi od ServiceUI.exe konkretnie
+1. Pełna jawność kodu źródłowego. ServiceUI.exe to zamknięta binarka z MDT/ADK toolkit — nikt spoza Microsoftu nie widział jej źródła. Kiedy Twój dział security pyta "co dokładnie robi ten plik", jedyna odpowiedź to "ufamy Microsoftowi". W naszym przypadku masz cały Program.cs do przeczytania linijka po linijce — to jest dokładnie różnica, która pozwala napisać sensowny SECURITY.md zamiast "trust us".
+2. Realne logowanie. ServiceUI.exe w praktyce jest niemy — kiedy coś nie działa w terenie, dostajesz zero informacji zwrotnej. Nasz kod loguje każdy krok i każdy kod błędu Win32 do pliku i Event Loga. To bezpośrednio odpowiada na realny problem, który sam napotkałeś (pamiętasz "nic się nie dzieje, brak loga" — tam właśnie ta różnica robiła robotę przy diagnozowaniu).
+3. Wąski, celowy zakres. ServiceUI.exe to ogólny loader — możesz nim opakować dosłownie cokolwiek, co w praktyce prowadzi do dokładnie tego błędu architektonicznego, który sam popełniłeś na początku (przepuszczenie całego skryptu przez most i utrata kontekstu SYSTEM). Nasze rozwiązanie wymusza wąski zakres przez samą architekturę — most służy tylko do jednego okna, cała logika biznesowa zostaje w SYSTEM. Mniejszy kod = mniejsza powierzchnia do audytu (security review przeczyta ~300 linii w 10 minut, nie zgaduje co robi zamknięta binarka).
+4. Brak zależności od zamrożonego narzędzia. MDT/ADK toolkit, z którego pochodzi ServiceUI.exe, jest w praktyce w fazie schyłkowej — Microsoft go nie rozwija aktywnie. Jeśli coś się zepsuje na nowym buildzie Windows, czekasz na łatkę, której może nie być. Nasz kod możemy naprawić tego samego dnia.
+Gdzie muszę być szczery — PSADT ma realne przewagi
+To akurat nie jest kwestia "PSADT kontra ServiceUI", tylko "PSADT kontra to, co my zbudowaliśmy":
+
+Dojrzałość przez skalę użycia. PSADT jest testowany przez tysiące organizacji, przez lata, na ogromnej różnorodności środowisk (RDS, multi-session, różne wersje Windows). Nasze narzędzie ma dokładnie tyle testów, ile sam przeprowadziłeś w tej rozmowie. To nie jest mała różnica dla działu security — "battle-tested przez community" to realna wartość, której świeżo napisany kod jeszcze nie ma.
+Pod maską PSADT robi to samo. Ich Execute-ProcessAsUser używa dokładnie tego samego wzorca (WTSQueryUserToken/CreateProcessAsUser) co my — więc architektonicznie nie wymyślamy niczego innego, tylko budujemy własną, minimalną wersję zamiast wziąć gotową, przetestowaną implementację.
+Pokrycie edge case'ów. PSADT ma lata poprawek na rzeczy typu: wielosesyjne serwery RDS, obsługa restartów, deduplication komunikatów UI, itd. — rzeczy, które my albo pomijamy świadomie (bo nie dotyczą Twojego środowiska), albo możemy odkryć boleśnie później.
+
+Moja szczera rekomendacja
+Nie musisz wybierać między "cały PSADT" a "nasz bespoke exe" jako jedyne opcje. Realistycznie masz trzy ścieżki:
+
+Zostań przy obecnym rozwiązaniu — uzasadnione, jeśli cenisz sobie pełną kontrolę, minimalizm i unikanie zależności od dużego frameworka, którego (jak mówisz) nie chcesz uzależniać całego enterprise. Koszt: to Ty utrzymujesz to narzędzie, testy edge case'ów robisz sam, w miarę jak się pojawiają.
+Zapożycz konkretnie Execute-ProcessAsUser z PSADT (jest open source, MIT-podobna licencja) jako sam mechanizm bridge'a, zamiast własnego SessionBridge.exe, ale zachowaj resztę naszej architektury (SYSTEM-first, wąski zakres bridge'a) — dostajesz przetestowaną implementację bez wciągania całego toolkita.
+Pełny PSADT — jeśli kiedyś dojdziesz do wniosku, że skala Twoich pakietów uzasadnia większy framework.
+
+Skoro explicite mówisz, że nie chcesz uzależniać całego enterprise od PSADT — opcja 1 (to, co mamy) jest rozsądnym, świadomym wyborem, pod warunkiem że rozumiesz koszt: to Ty jesteś teraz "maintainerem" tego narzędzia, nie ogromna społeczność. To nie jest wada dyskwalifikująca — to po prostu inny balans ryzyka, i myślę, że dla wąskiego, dobrze udokumentowanego use case'u jak Twój, jest to uzasadnione.
