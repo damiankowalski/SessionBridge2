@@ -11,14 +11,22 @@ place, and reflects the current (final) design as of this revision.
 
 ## Scope: what SessionBridge is used for in practice
 
-SessionBridge is invoked from *inside* SYSTEM-context packaging scripts
-(install/uninstall templates), for exactly one purpose: showing a WPF
-"applications are running, close them or wait" warning window to the logged-
-in user. It is not used to relocate any business logic (registry work,
-process detection, process termination, package install/removal) into the
-user's session - all of that stays with the SYSTEM-context caller, before
-and after the one bridged step. See the architecture diagram for the full
-flow.
+SessionBridge is invoked from *inside* SYSTEM-context packaging scripts, for
+exactly one purpose: showing a WPF "applications are running, close them or
+wait" warning window to the logged-in user. It is not used to relocate any
+business logic (registry work, process detection, process termination,
+package install/removal) into the user's session - all of that stays with
+the SYSTEM-context caller, before and after the one bridged step.
+
+Two entry points exist in the packaging templates, both optional and both
+following the same scoping rule:
+- **`install.ps1` → `Invoke-PreInstallCleanup`** - detects existing
+  installation(s) via the registry, bridges the warning window if processes
+  are running, then removes each matched entry - all as SYSTEM except the
+  window itself.
+- **`uninstall.ps1` → `Invoke-ProcessCloseWarning`** - a narrower version:
+  no registry search (the uninstall script already knows its target), just
+  detect → bridge the window → terminate, all as SYSTEM except the window.
 
 This scoping matters for review: the blast radius of SessionBridge itself is
 "can display a window and wait for it to close," not "can execute arbitrary
@@ -48,6 +56,12 @@ per-app logic as the user."
   so that detection/termination work reliably regardless of install
   location or process integrity level, which a bridged user-session process
   cannot guarantee.
+- It does not rely on an implicit or inherited working directory:
+  `lpCurrentDirectory` is explicitly set to a fixed, universally-readable
+  path (`C:\Windows\Temp`) rather than passed as `NULL` (which would inherit
+  the calling process's own working directory - see "File staging and
+  IMECache," below, for why that was a real problem in practice, not just a
+  theoretical one).
 
 **Primary risk to mitigate:** if this binary is ever invoked with an
 attacker-controlled command line, it would launch that payload into the
@@ -56,6 +70,34 @@ packaging scripts, with a hardcoded, reviewed command line** - never with a
 payload path derived from user input, network sources, or unvalidated
 config. This is enforced by convention in the calling script, not by the
 exe itself, since the exe is intentionally generic.
+
+## File staging and IMECache - a resolved design issue worth documenting
+
+Early production testing surfaced `CreateProcessAsUser` failing with
+`ERROR_ACCESS_DENIED (5)` when deployed via Intune (this had not appeared in
+local/manual testing). Root cause: the bridged script was being pointed
+directly at a path under Intune's per-app content-cache folder
+(`C:\Windows\IMECache\...`), which is deliberately SYSTEM/Administrators-only
+- protecting cached package content from tampering by standard users. The
+bridged process runs with the logged-in user's own (limited) token, which
+has no access there at all.
+
+This is now handled explicitly, and is worth noting for reviewers as a
+positive control rather than a residual risk: before invoking SessionBridge,
+the calling SYSTEM-context script copies only the two files the bridged
+process needs (the window script and a small JSON file of display data - app
+names and icon paths, nothing sensitive) into a scratch folder at
+`C:\ProgramData\ApplicationServices\<AppName>_<AppVersion>\`. This folder:
+- inherits `C:\ProgramData`'s default ACL (`BUILTIN\Users: Read & Execute`) -
+  no explicit permission grant is made or needed;
+- is created fresh per invocation and **deleted in its entirety** once the
+  window step completes, regardless of success or failure (wrapped in a
+  `finally` block) - nothing persists between runs;
+- never contains `SessionBridge.exe` itself, which does not need copying:
+  it's launched directly by the SYSTEM-context script (full access to
+  IMECache) and is already running as SYSTEM by the time it internally calls
+  `CreateProcessAsUser` - only the *bridged child process* it creates needs
+  file access, never SessionBridge.exe's own binary.
 
 ## An explicitly rejected alternative design
 
@@ -140,6 +182,11 @@ Every session enumerated, every token operation, and every launch attempt
   fixed, reviewed command-line payload built by the calling packaging
   script - never accepts payload paths from user input, network sources, or
   unvalidated config.
+- The bridged script and its JSON parameters are always staged into a
+  standard-user-readable scratch folder under
+  `C:\ProgramData\ApplicationServices\<AppName>_<AppVersion>\` before
+  SessionBridge is invoked - never pointed directly at Intune's IMECache
+  content-cache folder, which is SYSTEM/Administrators-only by design.
 - Platform target: x64 only, Windows 10/11 and Windows Server, matching our
   supported endpoint fleet.
 - RBAC over Intune Win32 app publishing/assignment is the practical access
@@ -154,3 +201,7 @@ Every session enumerated, every token operation, and every launch attempt
 - [ ] Confirm logging retention/location complies with data handling policy
 - [ ] Confirm RBAC scoping for Intune Win32 app publishing is reviewed
       alongside this code
+- [ ] Confirm the default `C:\ProgramData` ACL (`BUILTIN\Users: Read &
+      Execute`) is unmodified by GPO in the target environment - the file
+      staging described above relies on this default rather than an
+      explicit per-folder ACL grant

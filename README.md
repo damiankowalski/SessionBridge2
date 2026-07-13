@@ -14,15 +14,26 @@ purpose-built equivalent for our packaging standard.
 ## Where this fits in the bigger picture
 
 SessionBridge is **not** a general-purpose "run my script as the user" tool,
-and it is **not** meant to carry business logic. In our packaging template
-(`Uninstall-Generic-App.ps1` and its install-side equivalent), the *entire*
-script runs as SYSTEM, start to finish - registry detection across
-`HKLM`/`HKEY_USERS`, transcript logging to
-`C:\ProgramData\Microsoft\IntuneManagementExtension\Logs`, MSI/EXE
-uninstall/install, everything. SessionBridge is invoked from *inside* that
-script for exactly one narrow step: showing a WPF "close running
+and it is **not** meant to carry business logic. Our packaging templates -
+`install.ps1` and `uninstall.ps1` - run as SYSTEM start to finish: registry
+detection across `HKLM`/`HKEY_USERS`, transcript logging, MSI/EXE
+install/uninstall, everything. SessionBridge is invoked from *inside* those
+scripts for exactly one narrow step: showing a WPF "close running
 applications" warning window to the user. Everything before and after that
 one step stays SYSTEM.
+
+Each template exposes this as an **optional** function the packager can call
+if/when it's needed for that specific app:
+
+- **`install.ps1` → `Invoke-PreInstallCleanup`** - the full picture: detects
+  any existing installation(s) of the app via the registry (`HKLM` +
+  every logged-on user's `HKEY_USERS` hive), warns and closes running
+  processes if needed, then fully uninstalls every matched entry before the
+  new version installs.
+- **`uninstall.ps1` → `Invoke-ProcessCloseWarning`** - a lighter version:
+  this script already knows exactly what it's removing and how, so this
+  function only handles the "warn the user, close running processes"
+  step - no registry search, no uninstall logic.
 
 ```
 SYSTEM (whole script): detect running processes matching InstallLocation(s)
@@ -44,6 +55,13 @@ Detection and termination both stay with SYSTEM deliberately:
   user token can hit Access Denied trying to close a higher-integrity
   process, even one that's technically "theirs." SYSTEM can always close it.
 
+Both functions' helper functions (`RunMSI`, `RunEXE`, `Get-InstalledApplication`,
+etc.) are deliberately **nested inside** the outer function rather than
+defined at script scope. This keeps them local to that function only, so
+dropping this into any packaging template - regardless of what helper
+function names that template already uses for its own install/uninstall
+logic - can't silently collide with or override anything already there.
+
 ## What SessionBridge.exe does
 
 1. Enumerates all sessions on the machine (`WTSEnumerateSessions`), filters to
@@ -53,7 +71,10 @@ Detection and termination both stay with SYSTEM deliberately:
 3. Loads that user's environment block, so the bridged process resolves paths
    exactly as if the user had launched it themselves.
 4. Launches the command line it's given into that session's interactive
-   desktop (`CreateProcessAsUser`, `winsta0\default`).
+   desktop (`CreateProcessAsUser`, `winsta0\default`), with an explicit,
+   universally-readable working directory (`C:\Windows\Temp`) rather than
+   inheriting the caller's own - see "File accessibility," below, for why
+   this matters.
 5. **Waits** for that process to exit and returns its exit code as its own -
    this makes SessionBridge usable for "show something, wait for the
    outcome, then continue" flows, not just fire-and-forget.
@@ -62,6 +83,37 @@ SessionBridge itself carries zero domain knowledge - it doesn't know or care
 what it's launching. The specific script name/path it's told to run lives
 entirely in the calling PowerShell script, not in the exe. Renaming or
 swapping the bridged script requires no changes to SessionBridge.exe at all.
+
+## File accessibility for the bridged process
+
+This is a real gotcha worth understanding if you're extending either
+template: **the bridged process runs with the logged-in user's own, limited
+token - it needs actual read access to whatever file you point it at.**
+
+When packages are deployed via Intune, the package contents get extracted
+into Intune's per-app content-cache folder (`C:\Windows\IMECache\...`) -
+which is deliberately SYSTEM/Administrators-only, to protect cached package
+content from tampering. A standard user's token has **no access there at
+all**. Pointing the bridged script directly at a path under that folder
+fails with `ERROR_ACCESS_DENIED (5)` - not a bug in the bridging logic
+itself, just a straightforward permissions mismatch.
+
+Both `Invoke-PreInstallCleanup` and `Invoke-ProcessCloseWarning` handle this
+the same way: before invoking SessionBridge, SYSTEM (which has full access
+to the IMECache folder) copies just the two files the bridged process
+actually needs - `Show-ProcessCloseWarning.ps1` and a small JSON file with
+the display data - into a scratch folder under
+`C:\ProgramData\ApplicationServices\<AppName>_<AppVersion>\`. This inherits
+`C:\ProgramData`'s default permissions (`BUILTIN\Users: Read & Execute`) with
+no extra ACL work needed, and the whole folder is deleted again once the
+window step completes - nothing persists.
+
+**`SessionBridge.exe` itself is never copied and needs no such handling** -
+it's launched directly by the SYSTEM-context script (which already has full
+access to IMECache) and is already running as SYSTEM by the time it
+internally calls `CreateProcessAsUser`. The user's token only ever needs to
+read the files handed to the *bridged child process* it creates - never
+SessionBridge.exe's own file.
 
 ## What it explicitly does NOT do
 
@@ -80,6 +132,8 @@ swapping the bridged script requires no changes to SessionBridge.exe at all.
 
 - Visual Studio 2022, .NET Framework 4.8, Console App template.
 - Recommended: Release config, `x64` platform target.
+- See [project-properties.md](project-properties.md) for the full rundown of
+  which project settings matter here and why.
 
 ## Usage
 
