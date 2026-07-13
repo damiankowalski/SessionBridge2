@@ -343,7 +343,15 @@ namespace SessionBridge
                     false,
                     CREATE_UNICODE_ENVIRONMENT,
                     lpEnvironment,
-                    null,
+                    // Explicitly set the working directory rather than passing null.
+                    // null means "inherit the caller's own current directory" - which,
+                    // when this exe is invoked by a service like Intune Management
+                    // Extension, can be a SYSTEM-only path the duplicated (limited
+                    // user) token has no access to, causing CreateProcessAsUser itself
+                    // to fail with ERROR_ACCESS_DENIED (5) before the child even
+                    // starts. C:\Windows\Temp is readable/traversable by all local
+                    // users by default, so it's a safe, universal choice here.
+                    Environment.GetEnvironmentVariable("windir") + @"\Temp",
                     ref si,
                     out pi);
 
